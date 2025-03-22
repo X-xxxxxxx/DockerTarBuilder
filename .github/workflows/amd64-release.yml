@@ -1,4 +1,5 @@
 name: x86-64 Pull and Save Docker Image
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,18 +10,23 @@ on:
 
 jobs:
   pull_and_package:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest  # 使用最新版 Runner 获取更多磁盘空间
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Clean up Docker
+      - name: Clean up Disk Space
         run: |
+          # 深度清理 Docker 和系统临时文件
           docker system prune -a -f
           docker volume prune -f
+          sudo rm -rf /var/lib/docker/tmp/*
+          # 删除 GitHub Runner 预装的无用组件
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h  # 调试：查看剩余空间
 
       - name: Install pigz
-        run: sudo apt-get install -y pigz  # 安装多线程压缩工具
+        run: sudo apt-get install -y pigz
 
       - name: Process Images with Split
         run: |
@@ -30,21 +36,27 @@ jobs:
           
           output_dir="$GITHUB_WORKSPACE/docker-images"
           mkdir -p "$output_dir"
-
-          # 生成合并说明
           echo "使用方法: cat *.part.* > full.tar.gz" > "$output_dir/README.txt"
 
           for image in "${image_array[@]}"; do
             echo "==== 处理镜像: $image ===="
+            
+            # 拉取镜像并立即删除以减少空间占用
             docker pull --platform linux/amd64 "$image"
             
+            # 流式处理：save → pigz → split（无中间文件）
             safe_name=$(echo "$image" | sed 's/[^a-zA-Z0-9._-]/_/g')
             docker save "$image" | \
-            pigz -9 | \
-            split -d -b 1800M - "$output_dir/${safe_name}-amd64.tar.gz.part."
-
+              pigz -9 | \
+              split -d -b 1800M - "$output_dir/${safe_name}-amd64.tar.gz.part."
+            
+            # 立即清理镜像和临时文件
             docker rmi "$image"
+            sudo rm -rf /var/lib/docker/tmp/*
           done
+
+      - name: Check Disk Space After Build
+        run: df -h  # 调试：验证空间释放
 
       - name: Upload Split Artifacts
         uses: actions/upload-artifact@v4
