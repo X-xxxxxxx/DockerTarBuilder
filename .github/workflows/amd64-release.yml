@@ -1,68 +1,55 @@
-name: Get-AMD64-Docker-Images-Release
-
+name: x86-64 Pull and Save Docker Image
 on:
   workflow_dispatch:
     inputs:
       docker_images:
-        description: '输入镜像列表（英文逗号分隔）'
+        description: '输入镜像名称（英文逗号分隔）'
         required: true
-        default: 'alpine:latest'
+        default: 'alpine:latest,busybox:stable-glibc'
 
 jobs:
   pull_and_package:
     runs-on: ubuntu-22.04
     steps:
-      - name: 初始化清理
-        run: |
-          # 清理所有Docker资源
-          docker system prune -a -f --volumes
-          # 清空Docker临时目录
-          sudo rm -rf /var/lib/docker/tmp/*
-          # 删除残留文件
-          sudo rm -rf "$GITHUB_WORKSPACE/docker-images"
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: 拉取并分卷压缩镜像
+      - name: Clean up Docker
+        run: |
+          docker system prune -a -f
+          docker volume prune -f
+
+      - name: Install pigz
+        run: sudo apt-get install -y pigz  # 安装多线程压缩工具
+
+      - name: Process Images with Split
         run: |
           set -eo pipefail
           images="${{ github.event.inputs.docker_images }}"
           IFS=',' read -r -a image_array <<< "$images"
           
-          mkdir -p "$GITHUB_WORKSPACE/docker-images"
+          output_dir="$GITHUB_WORKSPACE/docker-images"
+          mkdir -p "$output_dir"
+
+          # 生成合并说明
+          echo "使用方法: cat *.part.* > full.tar.gz" > "$output_dir/README.txt"
 
           for image in "${image_array[@]}"; do
             echo "==== 处理镜像: $image ===="
+            docker pull --platform linux/amd64 "$image"
             
-            # 强制清理旧数据
-            docker rmi "$image" 2>/dev/null || true
-            sudo rm -f "$GITHUB_WORKSPACE/docker-images/${image//[^a-zA-Z0-9._-]/_}-amd64.tar*"
-
-            # 流式拉取-保存-压缩-分卷（无中间文件）
-            docker pull --platform linux/amd64 "$image" && \
+            safe_name=$(echo "$image" | sed 's/[^a-zA-Z0-9._-]/_/g')
             docker save "$image" | \
             pigz -9 | \
-            split -d -b 1500M - "$GITHUB_WORKSPACE/docker-images/${image//[^a-zA-Z0-9._-]/_}-amd64.tar.gz.part."
+            split -d -b 1800M - "$output_dir/${safe_name}-amd64.tar.gz.part."
 
-            # 立即删除镜像释放空间
             docker rmi "$image"
           done
 
-      - name: 上传分卷到Release
-        uses: softprops/action-gh-release@v2.1.0
+      - name: Upload Split Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: docker-amd64-$(date +%s)
-          files: |
+          name: split-docker-images
+          path: |
             docker-images/*
-          body: |
-            ### 合并命令
-            ```bash
-            cat *.part.* > full.tar.gz
-            docker load -i full.tar.gz
-            ```
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 最终清理
-        if: always()
-        run: |
-          docker system prune -a -f
-          sudo rm -rf "$GITHUB_WORKSPACE/docker-images"
+          retention-days: 1
