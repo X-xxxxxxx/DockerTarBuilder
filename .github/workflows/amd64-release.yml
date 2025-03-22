@@ -1,89 +1,35 @@
-name: x86-64 Pull and Save Docker Image
+name: 极简镜像下载器
 
 on:
   workflow_dispatch:
     inputs:
       docker_images:
-        description: '输入镜像名称（英文逗号分隔）'
+        description: '输入镜像名（用英文逗号分隔）'
         required: true
-        default: 'pennlinc/qsiprep:1.0.0,nipreps/fmriprep:24.1.1'
+        default: 'pennlinc/qsiprep:1.0.0'
 
 jobs:
-  pull_and_package:
-    runs-on: ubuntu-latest  # 使用最新版 Runner 获取最大磁盘空间
+  download:
+    runs-on: ubuntu-latest  # 自动使用最新系统获取最大空间
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Clean Disk Space
+      - name: 下载并切割镜像
         run: |
-          # 1. 清理 Docker 和系统残留文件
-          docker system prune -a -f
-          docker volume prune -f
+          # 自动清理旧文件
+          docker system prune -af
           sudo rm -rf /var/lib/docker/tmp/*
 
-          # 2. 删除 GitHub Runner 预装组件（释放 10-20GB）
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
-
-          # 3. 清理 APT 缓存
-          sudo apt clean
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo apt update
-
-      - name: Fix APT Dependency Issues
-        run: |
-          # 修复损坏的依赖关系
-          sudo apt --fix-broken install -y
-          sudo dpkg --configure -a
-
-          # 解除所有被保留的包
-          sudo apt-mark unhold $(apt-mark showhold)
-
-      - name: Install Requirements
-        run: |
-          # 安装核心工具（避免后续步骤报错）
-          sudo apt-get update
-          sudo apt-get install -y \
-            pigz \
-            coreutils \
-            docker.io \
-            ca-certificates \
-            curl \
-            gnupg \
-            lsb-release
-
-      - name: Process Images
-        run: |
-          set -eo pipefail
-          images="${{ github.event.inputs.docker_images }}"
-          IFS=',' read -r -a image_array <<< "$images"
-          output_dir="$GITHUB_WORKSPACE/docker-images"
-          mkdir -p "$output_dir"
-
-          # 生成合并说明
-          echo "合并命令: cat *.part.* > full.tar.gz" > "$output_dir/README.txt"
-
-          for image in "${image_array[@]}"; do
-            echo "==== 处理镜像: $image ===="
-            
-            # 拉取镜像（使用国内镜像加速）
+          # 一键分卷处理（自动处理所有镜像）
+          echo "${{ github.event.inputs.docker_images }}" | tr ',' '\n' | while read image; do
             docker pull --platform linux/amd64 "$image"
-
-            # 流式处理：save → pigz → split（无中间文件）
-            safe_name=$(echo "$image" | sed 's/[^a-zA-Z0-9._-]/_/g')
-            docker save "$image" | \
-              pigz -9 | \
-              split -d -b 1500M - "$output_dir/${safe_name}-amd64.tar.gz.part."
-
-            # 立即清理镜像和临时文件
+            safe_name=$(echo "$image" | tr '/:' '__')
+            docker save "$image" | gzip | split -b 1500M - "${safe_name}.part."
             docker rmi "$image"
-            sudo rm -rf /var/lib/docker/tmp/*
           done
 
-      - name: Upload Artifacts
+      - name: 上传分卷包
         uses: actions/upload-artifact@v4
         with:
-          name: split-docker-images
+          name: 切割好的镜像包
           path: |
-            docker-images/*
+            *.part.*
           retention-days: 1
